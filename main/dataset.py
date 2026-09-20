@@ -3,10 +3,13 @@ import librosa
 import numpy as np
 import torch as t
 import torchaudio
+import urllib
+import zipfile
+
 from torch.utils.data import Dataset
 
 class AudioMNISTDataset(Dataset):
-    def __init__(self, base_dir, max_folders=20, sr=22050):
+    def __init__(self, base_dir="./data/AudioMNIST", max_folders=20, sr=22050):
       super().__init__()
 
       self.base_dir = base_dir
@@ -22,9 +25,12 @@ class AudioMNISTDataset(Dataset):
       self.file_list = []
       self.labels = []
 
+      if not os.path.exists(base_dir):
+        print(f"Directory {base_dir} does not exist. Downloading dataset from github...")
+        self._download_dataset()
+
       all_folders = sorted([
-          f for f in os.listdir(base_dir)
-          if os.path.isdir(os.path.join(base_dir, f)) and f.isdigit()
+        f for f in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, f)) and f.isdigit()
       ])
 
       selected_folders = all_folders[:max_folders]
@@ -32,37 +38,61 @@ class AudioMNISTDataset(Dataset):
       print(f"Loading data from {len(selected_folders)} speakers...")
 
       for folder in selected_folders:
-          folder_path = os.path.join(base_dir, folder)
-          for filename in os.listdir(folder_path):
-              if filename.endswith('.wav'):
-                  digit = int(filename.split('_')[0])
-                  self.file_list.append(os.path.join(folder_path, filename))
-                  self.labels.append(digit)
+        folder_path = os.path.join(base_dir, folder)
+        for filename in os.listdir(folder_path):
+          if filename.endswith('.wav'):
+            digit = int(filename.split('_')[0])
+            self.file_list.append(os.path.join(folder_path, filename))
+            self.labels.append(digit)
 
       self.mel_transform = torchaudio.transforms.MelSpectrogram(
-          sample_rate=self.sr,
-          n_fft=self.n_fft,
-          hop_length=self.hop_length,
-          win_length=self.win_length,
-          n_mels=self.n_mels,
-          center=True,
-          pad_mode="reflect",
-          power=1.0,
-          normalized=True
+        sample_rate=self.sr,
+        n_fft=self.n_fft,
+        hop_length=self.hop_length,
+        win_length=self.win_length,
+        n_mels=self.n_mels,
+        center=True,
+        pad_mode="reflect",
+        power=1.0,
+        normalized=True
       )
 
       self.inv_mel_transform = torchaudio.transforms.InverseMelScale(
-          n_mels=self.n_mels,
-          sample_rate=self.sr,
-          n_stft=self.n_fft // 2 + 1
+        n_mels=self.n_mels,
+        sample_rate=self.sr,
+        n_stft=self.n_fft // 2 + 1
       )
 
       self.griffin_lim = torchaudio.transforms.GriffinLim(
-          n_fft=self.n_fft,
-          hop_length=self.hop_length,
-          win_length=self.win_length,
-          n_iter=64
+        n_fft=self.n_fft,
+        hop_length=self.hop_length,
+        win_length=self.win_length,
+        n_iter=64
       )
+
+    def _download_dataset(self):
+      os.makedirs(self.base_dir, exist_ok=True)
+      dirname = os.path.dirname(self.base_dir)
+      path = os.path.join(dirname, "AudioMNIST.zip")
+      urllib.request.urlretrieve("https://github.com/soerenab/AudioMNIST/archive/refs/heads/master.zip", path)
+      with zipfile.ZipFile(path, "r") as zfile:
+        zfile.extractall(dirname)
+
+      extracted_dir = os.path.dirname(dirname, "AudioMNIST-master")
+      for item in os.listdir(extracted_dir):
+        src, dst = os.path.join(extracted_dir, item), os.path.join(self.base_dir, item)
+        if os.path.isdir(src) and item.isdigit():
+          os.rename(src, dst)
+
+      os.remove(path)
+
+      try: 
+        os.rmdir(extracted_dir) 
+      except OSError: 
+        pass
+
+      print(f"Downloaded AudioMNIST dataset to directory {self.base_dir}")
+      return
 
     def __len__(self):
       return len(self.file_list)
