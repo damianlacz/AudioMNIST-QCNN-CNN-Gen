@@ -35,13 +35,13 @@ class Encoder(nn.Module):
         x = self.bneck1(x)
         x = self.bneck2(x)
 
-        return self.mu(x), self.logvar(x)
+        return x, self.mu(x), self.logvar(x)
 
 class Decoder(nn.Module):
   def __init__(self, latent_dim, embed_dim=64):
       super().__init__()
       self.bneck = nn.Linear(latent_dim + embed_dim, 64 * 10 * 11)
-      nn.init.normal_(self.bneck.weight)
+      #nn.init.normal_(self.bneck.weight)
       self.unflatten = nn.Unflatten(1, (64, 10, 11))
 
       self.trans_conv1 = nn.ConvTranspose2d(64, 32, kernel_size=(3, 3), stride=(2, 2), padding=(0, 0))
@@ -52,8 +52,10 @@ class Decoder(nn.Module):
       self.leaky_relu = nn.LeakyReLU()
       self.relu = nn.ReLU()
 
-  def forward(self, x, emb):
-    x = t.cat([x, emb], dim=1)
+  def forward(self, x, emb=None):
+    if emb is not None:
+      x = t.cat([x, emb], dim=1)
+    
     x = self.bneck(x)
     x = self.unflatten(x)
 
@@ -66,6 +68,9 @@ class Decoder(nn.Module):
     return x
 
 class VAE(nn.Module):
+  default_recon_loss = nn.MSELoss()
+  default_kl_loss = staticmethod(lambda mu, logvar: -0.5 * t.mean(t.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)))
+
   def __init__(self, latent_dim=128, num_classes=10, embed_dim=64):
       super().__init__()
       self.latent_dim = latent_dim
@@ -81,26 +86,30 @@ class VAE(nn.Module):
       eps = t.randn_like(std)
       return mu + eps * std
 
-  def forward(self, x, label):
-      mu, logvar = self.encoder(x)
+  def forward(self, x, label=None):
+      _, mu, logvar = self.encoder(x)
       z = self.reparameterize(mu, logvar)
 
-      emb = self.num_embed(label)
+      emb = self.num_embed(label) if label is not None else None
       reconstruction = self.decoder(z, emb)
       return reconstruction, mu, logvar
 
-  def train(self, dataloader, optimizer, recon_loss, kl_loss, alpha=1.0, beta=1.0, epochs=10, device=t.device('cpu')):
+  def fit(self, dataloader, optimizer, recon_loss=None, kl_loss=None, include_labels=True, alpha=1.0, beta=1.0, epochs=10, device=t.device('cpu')):
     self.train()
+
+    if recon_loss is None: recon_loss = self.default_recon_loss
+    if kl_loss is None: kl_loss = self.default_kl_loss
+
     for epoch in range(epochs):
       pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
       for spec, label in pbar:
         spec, label = spec.to(device), label.long().to(device)
         optimizer.zero_grad()
 
-        x, mu, logvar = self(spec, label)
+        result = self(spec, label if include_labels else None)
 
-        recon = alpha * recon_loss(x, spec)
-        kl = beta * kl_loss(mu, logvar)
+        recon = alpha * recon_loss(result[0], spec)
+        kl = beta * kl_loss(*result[1:])
         loss = recon + kl
         loss.backward()
         optimizer.step()
@@ -109,13 +118,18 @@ class VAE(nn.Module):
       print(f"Epoch {epoch+1} Loss: {loss.item()}")
 
   @t.no_grad()
-  def generate_sample(self, label=None, batch_size=4, device='cpu'):
+  def sample(self, label=None, batch_size=4, device='cpu'):
     z = t.randn(batch_size, self.latent_dim, device=device)
-
+     
     if label is None:
       label = t.randint(0, self.num_classes, (batch_size,), device=device)
-
+     
     emb = self.num_embed(label)
+    return z, emb
+
+  @t.no_grad()
+  def generate_sample(self, label=None, batch_size=4, device='cpu'):
+    z, emb = self.sample(label=label, batch_size=batch_size, device=device)
     return self.decoder(z, emb)
 
   @t.no_grad()
@@ -123,36 +137,36 @@ class VAE(nn.Module):
     self.eval()
     sample, label = next(iter(DataLoader(test_dataset, batch_size=batch_size, shuffle=True)))
 
-    assert callable(getattr(self, "generate_sample")), f"Class {__name__} should have generate_sample method implemented."
     gen = self.generate_sample(label=label, batch_size=batch_size, device=device).cpu().numpy()
     recon = self(sample, label)[0].cpu().numpy()
     sample = sample.cpu().numpy()
     #print("mean", gen.mean(), "std", gen.std(), "min", gen.min(), "max", gen.max())
 
-    fig, axes = plt.subplots(batch_size, 3, figsize=(21, 15))
+    return self.visualize_spectrograms(sample, gen, recon, label, batch_size=batch_size)
+
+  def visualize_spectrograms(self, sample, gen, recon, labels, batch_size=4):
+    fig, axes = plt.subplots(batch_size, 3, figsize=(21, 4 * batch_size))
     axes = np.atleast_2d(axes)
 
     for i in range(batch_size):
-        orig_spec = sample[i][0]
-        gen_spec = gen[i][0]
-        recon_spec = recon[i][0]
+      orig_spec = sample[i][0]
+      gen_spec = gen[i][0]
+      recon_spec = recon[i][0]
 
-        specs_dict = dict(zip(["Original", "Generated", "Reconstructed"], [orig_spec, gen_spec, recon_spec]))
+      specs_dict = dict(zip(["Original", "Generated", "Reconstructed"], [orig_spec, gen_spec, recon_spec]))
 
-        for k, (title, spec) in enumerate(specs_dict.items()):
-            ax = axes[i, k]
-            img = librosa.display.specshow(
-                spec,
-                sr=22050,
-                hop_length=256,
-                x_axis='time',
-                y_axis='mel',
-                ax=ax
-            )
-            ax.set_title(f"{title} Spectrogram (Digit {label[i].item()})")
-            fig.colorbar(img, format='%+2.0f dB', ax=ax)
+      for k, (title, spec) in enumerate(specs_dict.items()):
+          ax = axes[i, k]
+          img = librosa.display.specshow(
+              spec,
+              sr=22050,
+              hop_length=256,
+              x_axis='time',
+              y_axis='mel',
+              ax=ax
+          )
+          ax.set_title(f"{title} Spectrogram (Digit {labels[i].item()})")
+          fig.colorbar(img, format='%+2.0f dB', ax=ax)
 
     plt.tight_layout()
     plt.show()
-
-    return orig_spec, gen_spec, recon_spec

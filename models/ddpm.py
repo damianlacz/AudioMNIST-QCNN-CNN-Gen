@@ -29,7 +29,7 @@ class ForwardDiffusionProcess:
 
 class TimeEmbedding(nn.Module):
   def __init__(self, dim):
-    super().__init__()
+    super(TimeEmbedding, self).__init__()
     self.dim = dim
     self.mlp = nn.Sequential(
         nn.Linear(dim, dim * 4),
@@ -115,7 +115,7 @@ class DiffusionModel(nn.Module):
     return self.model(x, time, label)
 
   def train(self, dataloader, optimizer, loss_fn, alpha=100.0, epochs=10, device=t.device('cpu')):
-    self.train()
+    super(DiffusionModel, self).train(mode=True)
     for epoch in range(epochs):
       pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
       for x_0, label in pbar:
@@ -136,7 +136,7 @@ class DiffusionModel(nn.Module):
 
   @t.no_grad()
   def _reverse_step(self, x_t, time, label):
-    self.model.eval()
+    super(DiffusionModel, self).train(mode=False)
     device = x_t.device
     time, label = time.to(device), label.to(device)
     beta_t = self.betas[time.cpu()][:, None, None, None].to(device)
@@ -167,7 +167,7 @@ class DiffusionModel(nn.Module):
     return x
 
   @t.no_grad()
-  def visualize_sample(self, test_dataset, batch_size=4, device=t.device('cpu')):
+  def visualize_sample(self, test_dataset, label=None, batch_size=4, device=t.device('cpu')):
     sample, label = next(iter(DataLoader(test_dataset, batch_size=batch_size, shuffle=True)))
 
     assert callable(getattr(self, "generate_sample")), f"Class {__name__} should have generate_sample method implemented."
