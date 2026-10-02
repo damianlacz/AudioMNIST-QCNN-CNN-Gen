@@ -30,7 +30,7 @@ class Generator(nn.Module):
       x = self.input_layer(x).view(-1, 64, 10, 11)
     else:
       x = self.input_layer_uncond(x).view(-1, 64, 10, 11)
-    
+
     x = self.leaky_relu(x)
     x = self.dropout(x)
     x = self.trans_conv1(x)
@@ -39,7 +39,9 @@ class Generator(nn.Module):
     x = self.trans_conv2(x)
     x = self.leaky_relu(x)
     x = self.dropout(x)
-    return self.trans_conv3(x)
+
+    result = self.trans_conv3(x)
+    return result
 
 class Discriminator(nn.Module):
   def __init__(self, embed_dim=64):
@@ -90,34 +92,49 @@ class GAN(nn.Module):
   def forward(self, x, label=None):
     noise = t.randn(x.shape[0], self.noise_dim)
     gen_spec = self.generator(noise, label=label)
-    gen_prob = self.discriminator(gen_spec.detach(), label=label)
+    gen_prob = self.discriminator(gen_spec, label=label)
     spec_prob = self.discriminator(x, label=label)
     return gen_spec, gen_prob, spec_prob
 
-  def fit(self, dataloader, gen_opt, disc_opt, gen_loss_fn, disc_loss_fn, alpha=1.0, beta=1.0, label_smoothing=0.8, epochs=10, device=device):
+  def calc_gen_loss(self, orig_spec, gen_spec, gen_loss_fn=None, disc_loss_fn=None, label=None, alpha=1.0, beta=1.0, device='cpu', **kwargs):
+    gen_loss_fn = gen_loss_fn or nn.MSELoss(**kwargs)
+    disc_loss_fn = disc_loss_fn or nn.BCEWithLogitsLoss(**kwargs)
+
+    gen_prob = self.discriminator(gen_spec, label=label)
+    return alpha * gen_loss_fn(orig_spec, gen_spec) + beta * disc_loss_fn(gen_prob, t.ones_like(gen_prob, device=device))
+
+  def calc_disc_loss(self, orig_spec, gen_spec, disc_loss_fn=None, label=None, beta=1.0, label_smoothing=0.8, device='cpu', **kwargs):
+    disc_loss_fn = disc_loss_fn or nn.BCEWithLogitsLoss(**kwargs)
+
+    gen_prob = self.discriminator(gen_spec, label=label)
+    spec_prob = self.discriminator(orig_spec, label=label)
+
+    fake_loss = disc_loss_fn(gen_prob, t.zeros_like(gen_prob, device=device))
+    real_loss = disc_loss_fn(spec_prob, label_smoothing * t.ones_like(spec_prob, device=device))
+
+    return beta * (fake_loss + real_loss), fake_loss, real_loss
+
+  def fit(self, dataloader, gen_opt, disc_opt, gen_loss_fn=None, disc_loss_fn=None, alpha=1.0, beta=1.0, label_smoothing=0.8, epochs=10, device='cpu', **kwargs):
     self.train()
+    gen_loss_fn = gen_loss_fn or nn.MSELoss(**kwargs)
+    disc_loss_fn = disc_loss_fn or nn.BCEWithLogitsLoss(**kwargs)
+
     for epoch in range(epochs):
       pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
       for spec, label in pbar:
         spec, label = spec.to(device), label.to(device)
-        gen_opt.zero_grad(set_to_none=True)
 
-        #batch_size = spec.shape[0]
-        #noise = t.randn(batch_size, self.noise_dim, device=device)
-        #gen_spec = self.generator(noise, label)
-        gen_spec, gen_prob, spec_prob = self(spec, label)
+        batch_size = spec.shape[0]
+        noise = t.randn(batch_size, self.noise_dim, device=device)
+        gen_spec = self.generator(noise, label=label)
 
-        gen_loss = alpha * gen_loss_fn(spec, gen_spec)
+        gen_opt.zero_grad()
+        gen_loss = self.calc_gen_loss(spec, gen_spec, gen_loss_fn=gen_loss_fn, disc_loss_fn=disc_loss_fn, label=label, alpha=alpha, beta=beta, device=device, **kwargs)
         gen_loss.backward()
         gen_opt.step()
 
-        disc_opt.zero_grad(set_to_none=True)
-        #gen_prob = self.discriminator(gen_spec.detach(), label)
-        #spec_prob = self.discriminator(spec, label)
-        fake_loss = disc_loss_fn(gen_prob, t.zeros_like(gen_prob, device=device))
-        real_loss = disc_loss_fn(spec_prob, label_smoothing * t.ones_like(spec_prob, device=device))
-        disc_loss = beta * (fake_loss + real_loss)
-
+        disc_opt.zero_grad()
+        disc_loss, fake_loss, real_loss = self.calc_disc_loss(spec, gen_spec.detach(), disc_loss_fn=disc_loss_fn, label=label, beta=beta, label_smoothing=label_smoothing, device=device, **kwargs)
         disc_loss.backward()
         disc_opt.step()
 

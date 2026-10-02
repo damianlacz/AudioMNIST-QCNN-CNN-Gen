@@ -22,13 +22,13 @@ class QGenerator(Generator):
         self.n_layers = n_layers
         self.n_qubits = n_qubits
         self.n_qubits_label = n_qubits_label
-        
+
         self.dm_dim = (2 ** self.n_qubits) ** 2
-        
+
         super(QGenerator, self).__init__(noise_dim=self.dm_dim, embed_dim=n_qubits_label)
 
         self.total_qubits = self.n_qubits + self.n_qubits_label
-        
+
         dev = qml.device("default.qubit", wires=self.total_qubits)
         weights = {"weights": (self.n_layers, self.total_qubits, 3)}
         @qml.qnode(dev, interface='torch', diff_method="backprop")
@@ -52,13 +52,13 @@ class QGenerator(Generator):
 
         self.circuits = dict(qml_generator=qml.qnn.TorchLayer(default_quantum_generator_circuit, weights))
 
-    def forward(self, x, label=None):
+    def forward(self, x, label=None, verbose=False):
         z = t.tanh(x) * t.pi
         emb = t.tanh(self.num_embed(label)) * t.pi
-        
+
         inputs = t.cat([z, emb], dim=1)
         rho = self.circuits["qml_generator"](inputs)
-        return super(QGenerator, self).forward(rho.flatten(1), None), rho
+        return super(QGenerator, self).forward(rho.flatten(1), label=label, verbose=verbose)
 
 class QDiscriminator(Discriminator):
     def __init__(self, n_qubits=2, n_qubits_label=2, n_layers=3):
@@ -79,7 +79,7 @@ class QDiscriminator(Discriminator):
             sep = int(np.prod(self.dm_dim))
             rho = inputs[:sep].reshape(*self.dm_dim)
             emb_angles = inputs[sep:]
-            
+
             # TODO: MAKE IT BATCHED
             dm = qml.QubitDensityMatrix(rho, wires=range(self.n_qubits))
 
@@ -100,8 +100,6 @@ class QDiscriminator(Discriminator):
     def forward(self, rho, label=None):
         emb = t.tanh(self.num_embed(label)) * t.pi
         inputs = t.cat([rho.flatten(1), emb], dim=1)
-        # for now we calculate probs per single batch
-        # because QubitDensityMatrix accepts only single density matrix
         expvals = t.stack([self.circuits["qml_discriminator"](inputs[b]) for b in range(rho.shape[0])])
         return (1.0 + expvals) / 2.0
 
@@ -119,7 +117,12 @@ class QGAN(GAN):
           qml.AmplitudeEmbedding(inputs, wires=range(self.noise_dim), normalize=True)
           for layer in range(n_layers_disc):
               for i in range(self.noise_dim):
-                  qml.Rot(weights[layer, i, 0],weights[layer, i, 1],weights[layer, i, 2],wires=i)
+                  qml.Rot(
+                      weights[layer, i, 0],
+                      weights[layer, i, 1],
+                      weights[layer, i, 2],
+                      wires=i
+                  )
 
               for i in range(self.noise_dim - 1):
                   qml.CNOT(wires=[i, i + 1])
@@ -133,15 +136,23 @@ class QGAN(GAN):
     def forward(self, spec, label=None):
         noise = t.randn(spec.shape[0], self.noise_dim, device=spec.device)
 
-        gen_spec, rho = self.generator(noise, label=label)
-        gen_prob = self.discriminator(rho, label=label).detach()
+        gen_spec, rho = self.generator(noise, label=label, verbose=True)
+        gen_prob = self.discriminator(rho, label=label)
 
         amplitude = self.discriminator.spec_encoder(spec, label=label)
+        #print(amplitude)
         sigma = self.quantum_encoder(amplitude)
         spec_prob = self.discriminator(sigma, label=label)
-        print(gen_prob, spec_prob)
-        
+
         return gen_spec, gen_prob, spec_prob
+    
+    def calc_gen_loss(self, orig_spec, gen_spec, gen_loss_fn=None, disc_loss_fn=None, label=None, alpha=1.0, beta=1.0, device='cpu', **kwargs):
+      return super(QGAN, self).calc_gen_loss(orig_spec, gen_spec, gen_loss_fn=gen_loss_fn, disc_loss_fn=disc_loss_fn, label=label, alpha=alpha, beta=beta, device=device, **kwargs)
+
+    def calc_disc_loss(self, orig_spec, gen_spec, disc_loss_fn=None, label=None, beta=1.0, label_smoothing=0.8, device='cpu', **kwargs):
+      amplitude = self.discriminator.spec_encoder(orig_spec, label=label)
+      sigma, rho = self.quantum_encoder(amplitude), gen_spec
+      return super(QGAN, self).calc_disc_loss(sigma, rho, disc_loss_fn=disc_loss_fn, label=label, beta=beta, label_smoothing=label_smoothing, device=device, **kwargs)
 
     def visualize_sample(self, test_dataset, label=None, batch_size=4, device='cpu', style='mpl', **kwargs):
         dim = np.prod(self.generator.dm_dim) + self.generator.n_qubits_label
