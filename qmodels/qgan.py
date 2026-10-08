@@ -3,14 +3,9 @@ import torch.nn as nn
 import numpy as np
 import pennylane as qml
 
-import models.gan as gan
-import qmodels.circuits as circuits
-
 from models.gan import GAN, Generator, Discriminator
 from qmodels.circuits import generator_circuit, discriminator_circuit
 from qmodels.circuits import visualize_circuits
-
-from tqdm import tqdm
 
 import torch as t
 import torch.nn as nn
@@ -129,19 +124,19 @@ class QGAN(GAN):
 
           return qml.density_matrix(wires=range(self.noise_dim))
 
-        self.quantum_encoder = qml.qnn.TorchLayer(quantum_encoder, weights)
-
-        self.circuits = self.generator.circuits | self.discriminator.circuits
+        quantum_encoder_circuit = dict(qml_quantum_encoder=qml.qnn.TorchLayer(quantum_encoder, weights))
+        self.circuits = self.generator.circuits | self.discriminator.circuits | quantum_encoder_circuit
 
     def forward(self, spec, label=None):
         noise = t.randn(spec.shape[0], self.noise_dim, device=spec.device)
 
-        gen_spec, rho = self.generator(noise, label=label, verbose=True)
+        rho = self.generator(noise, label=label)
+        gen_spec = self.generator.generate_spec(rho, label=label)
         gen_prob = self.discriminator(rho, label=label)
 
         amplitude = self.discriminator.spec_encoder(spec, label=label)
         #print(amplitude)
-        sigma = self.quantum_encoder(amplitude)
+        sigma = self.circuits["qml_quantum_encoder"](amplitude)
         spec_prob = self.discriminator(sigma, label=label)
 
         return gen_spec, gen_prob, spec_prob

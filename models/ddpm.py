@@ -16,7 +16,7 @@ class ForwardDiffusionProcess:
     self.n_steps = n_steps
     self.betas = self._beta_scheduler(start, end, n_steps)
     self.alphas = 1.0 - self.betas
-    self.alphas_bar = t.cumprod(self.alphas, dim=0) # fixed axis=0 to dim=0
+    self.alphas_bar = t.cumprod(self.alphas, dim=0)
 
   def _beta_scheduler(self, start=1e-4, end=0.02, n_steps=1000):
     return t.linspace(start, end, n_steps)
@@ -28,8 +28,8 @@ class ForwardDiffusionProcess:
     return t.sqrt(alpha_bar_t) * x_0 + t.sqrt(1.0 - alpha_bar_t) * eps, eps
 
 class TimeEmbedding(nn.Module):
-  def __init__(self, dim):
-    super(TimeEmbedding, self).__init__()
+  def __init__(self, dim=32):
+    super().__init__()
     self.dim = dim
     self.mlp = nn.Sequential(
         nn.Linear(dim, dim * 4),
@@ -53,53 +53,52 @@ class InverseDiffusionProcess(nn.Module):
         self.time_emb = TimeEmbedding(time_dim)
         self.num_emb = nn.Embedding(10, embed_dim)
 
-        # Encoder Path
-        self.enc_block1 = ConvBlock(1, 16, time_dim=time_dim, embed_dim=embed_dim)
+        self.unet_encoder = nn.Sequential(
+            ConvBlock(1, 32, time_dim=time_dim, embed_dim=embed_dim),
+            ConvBlock(32, 64, time_dim=time_dim, embed_dim=embed_dim),
+            ConvBlock(64, 128, time_dim=time_dim, embed_dim=embed_dim)
+        )
+        
+        self.attn = SelfAttentionLayer(channels=128, time_dim=time_dim, embed_dim=embed_dim, num_heads=8)
+        self.res_block = ResBlock(128, time_dim=time_dim, embed_dim=embed_dim)
+        self.res_attn = SelfAttentionLayer(channels=128, time_dim=time_dim, embed_dim=embed_dim, num_heads=8)
 
-        self.enc_block2 = ConvBlock(16, 32, time_dim=time_dim, embed_dim=embed_dim)
-        #self.attn1 = SelfAttentionLayer(channels=32, time_dim=time_dim, embed_dim=embed_dim, num_heads=4)
+        self.unet_decoder = nn.Sequential(
+            TransConvBlock(256, 64, time_dim=time_dim, embed_dim=embed_dim, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1)),
+            TransConvBlock(128, 32, time_dim=time_dim, embed_dim=embed_dim, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1)),
+            TransConvBlock(64, 16, time_dim=time_dim, embed_dim=embed_dim, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1))
+        )
 
-        self.enc_block3 = ConvBlock(32, 64, time_dim=time_dim, embed_dim=embed_dim)
-        self.attn2 = SelfAttentionLayer(channels=64, time_dim=time_dim, embed_dim=embed_dim, num_heads=4)
+        self.out = nn.Conv2d(16, 1, kernel_size=(3, 4), padding=(1, 1))
 
-        self.res_block = ResBlock(64, time_dim=time_dim, embed_dim=embed_dim)
-        self.res_attn = SelfAttentionLayer(channels=64, time_dim=time_dim, embed_dim=embed_dim, num_heads=4)
+    def forward(self, x, time, label=None):
 
-        self.dec_block1 = TransConvBlock(128, 32, time_dim=time_dim, embed_dim=embed_dim, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1))
-        self.dec_attn1 = SelfAttentionLayer(channels=32, time_dim=time_dim, embed_dim=embed_dim, num_heads=4)
+        x, t_emb, skips = self.encode(x, time, label=label)
 
-        self.dec_block2 = TransConvBlock(64, 16, time_dim=time_dim, embed_dim=embed_dim, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1))
-        #self.dec_attn2 = SelfAttentionLayer(channels=16, time_dim=time_dim, embed_dim=embed_dim, num_heads=4)
-
-        # Final output conv to restore exact 80x87 resolution
-        self.dec_conv3 = nn.ConvTranspose2d(32, 1, kernel_size=(4, 3), stride=(2, 2), padding=(1, 1))
-
-    def forward(self, x, time, label):
-        t_emb = self.time_emb(time)
-        num_emb = self.num_emb(label)
-        t_emb = t.cat([t_emb, num_emb], dim=1)
-
-        e1 = self.enc_block1(x, t_emb)    # Shape: [B, 16, 40, 44]
-
-        e2 = self.enc_block2(e1, t_emb)   # Shape: [B, 32, 20, 22]
-        #e2 = self.attn1(e2, t_emb)
-
-        e3 = self.enc_block3(e2, t_emb)   # Shape: [B, 64, 10, 11]
-        e3 = self.attn2(e3, t_emb)
-
-        x = self.res_block(e3, t_emb)      # Shape: [B, 64, 10, 11]
+        x = self.res_block(x, t_emb)     
         x = self.res_attn(x, t_emb)
 
-        x = t.cat([x, e3], dim=1)          # Channels: 64 + 64 = 128
-        x = self.dec_block1(x, t_emb)      # Out: 32 channels, shape: [B, 32, 20, 22]
-        x = self.dec_attn1(x, t_emb)
+        x = self.decode(x, t_emb, *skips)
 
-        x = t.cat([x, e2], dim=1)          # Channels: 32 + 32 = 64
-        x = self.dec_block2(x, t_emb)      # Out: 16 channels, shape: [B, 16, 40, 44]
-        #x = self.dec_attn2(x, t_emb)
+        return self.out(x)
+    
+    def encode(self, x, time, label=None):
+      t_emb = self.time_emb(time)
+      num_emb = self.num_emb(label) if label is not None else t.zeros_like(x.size(0), self.embed_dim, device=x.device)
+      t_emb = t.cat([t_emb, num_emb], dim=1)
+      skips = []
+      for block in self.unet_encoder:
+        x = block(x, t_emb)
+        skips.append(x)
+      x = self.attn(x, t_emb)
 
-        x = t.cat([x, e1], dim=1)          # Channels: 16 + 16 = 32
-        return self.dec_conv3(x)           # Out: 1 channel, shape: [B, 1, 80, 87]
+      return x, t_emb, skips
+
+    def decode(self, x, t_emb, *skips):
+      for block, skip in zip(self.unet_decoder, reversed(skips)):
+        x = t.cat([x, skip], dim=1)
+        x = block(x, t_emb)
+      return x
 
 class DiffusionModel(nn.Module):
   def __init__(self, start=1e-4, end=0.02, n_steps=1000, time_dim=64, embed_dim=64):
@@ -111,11 +110,11 @@ class DiffusionModel(nn.Module):
     self.alphas_bar = self.fwdprocess.alphas_bar
     self.n_steps = n_steps
 
-  def forward(self, x, time, label):
-    return self.model(x, time, label)
+  def forward(self, x, time, label=None):
+    return self.model(x, time, label=label)
 
-  def train(self, dataloader, optimizer, loss_fn, alpha=100.0, epochs=10, device=t.device('cpu')):
-    super(DiffusionModel, self).train(mode=True)
+  def fit(self, dataloader, optimizer, loss_fn, alpha=100.0, epochs=10, device='cpu'):
+    self.train()
     for epoch in range(epochs):
       pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
       for x_0, label in pbar:
@@ -125,7 +124,7 @@ class DiffusionModel(nn.Module):
 
         time = t.randint(0, self.n_steps, (x_0.shape[0],), device=device)
         x_t, noise = self.fwdprocess.calc_noisy_image(x_0, time)
-        pred_noise = self(x_t, time, label)
+        pred_noise = self(x_t, time, label=label)
         loss = alpha * loss_fn(pred_noise, noise)
 
         loss.backward()
@@ -136,46 +135,48 @@ class DiffusionModel(nn.Module):
 
   @t.no_grad()
   def _reverse_step(self, x_t, time, label):
-    super(DiffusionModel, self).train(mode=False)
+    self.eval()
     device = x_t.device
-    time, label = time.to(device), label.to(device)
-    beta_t = self.betas[time.cpu()][:, None, None, None].to(device)
-    alpha_t = self.alphas[time.cpu()][:, None, None, None].to(device)
-    alpha_bar_t = self.alphas_bar[time.cpu()][:, None, None, None].to(device)
-    mean = (1.0 / t.sqrt(alpha_t)) * (x_t - beta_t / t.sqrt(1.0 - alpha_bar_t) * self.model(x_t, time, label))
+    time, label = time.to('cpu'), label.to(device)
+    beta_t = self.betas[time][:, None, None, None].to(device)
+    alpha_t = self.alphas[time][:, None, None, None].to(device)
+    alpha_bar_t = self.alphas_bar[time][:, None, None, None].to(device)
+    mean = (1.0 / t.sqrt(alpha_t)) * (x_t - beta_t / t.sqrt(1.0 - alpha_bar_t) * self(x_t, time.to(device), label))
     if t.all(time == 0):
         return mean
 
     prev_time = t.clamp(time - 1, 0)
     prev_alpha_bar_t = self.alphas_bar[prev_time][:, None, None, None].to(device)
-    posterior_var = beta_t * (1.0 - prev_alpha_bar_t) / (1.0 - alpha_bar_t)
+    var = beta_t * (1.0 - prev_alpha_bar_t) / (1.0 - alpha_bar_t)
     eps = t.randn_like(x_t)
-    return mean + t.sqrt(posterior_var) * eps
+    return mean + t.sqrt(var) * eps
 
   @t.no_grad()
-  def _reconstruct_spec(self, x_t, label=None, batch_size=4, device=t.device('cpu')):
+  def _reconstruct_spec(self, x_t, label=None, batch_size=4, device='cpu'):
     for step in reversed(range(self.n_steps)):
       time = t.full((batch_size,), step, dtype=t.long, device=device)
       x_t = self._reverse_step(x_t, time, label)
     return x_t
 
   @t.no_grad()
-  def generate_sample(self, label=None, batch_size=4, device=t.device('cpu')):
+  def generate_sample(self, label=None, batch_size=4, device='cpu'):
     x = t.randn(batch_size, 1, 80, 87, device=device)
     label = t.randint(0, 10, (batch_size,), dtype=t.long, device=device) if label is None else label.long().to(device)
     x = self._reconstruct_spec(x, label=label, batch_size=batch_size, device=device)
     return x
 
   @t.no_grad()
-  def visualize_sample(self, test_dataset, label=None, batch_size=4, device=t.device('cpu')):
+  def visualize_sample(self, test_dataset, batch_size=4, device='cpu'):
     sample, label = next(iter(DataLoader(test_dataset, batch_size=batch_size, shuffle=True)))
 
-    assert callable(getattr(self, "generate_sample")), f"Class {__name__} should have generate_sample method implemented."
     gen = self.generate_sample(label=label, batch_size=batch_size, device=device).cpu().numpy()
     noisy_orig = self.fwdprocess.calc_noisy_image(sample, t.tensor([self.n_steps - 1]))[0]
-    recon = self._reconstruct_spec(noisy_orig, label).cpu().numpy()
+    recon = self._reconstruct_spec(noisy_orig, label=label, batch_size=batch_size, device=device).cpu().numpy()
     sample = sample.cpu().numpy()
 
+    return self.visualize_spectrograms(sample, gen, recon, label, batch_size=batch_size)
+
+  def visualize_spectrograms(self, sample, gen, recon, label, batch_size=4):
     fig, axes = plt.subplots(batch_size, 3, figsize=(21, 15))
     axes = np.atleast_2d(axes)
 
