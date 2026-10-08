@@ -45,7 +45,6 @@ class QVAE(VAE):
         #self.quantization_layer = nn.Linear(latent_dim, n_qubits)
         self.encoder.bneck2.out_features = n_qubits
 
-
         #self.unquantization_layer = nn.Linear(2 * self.dim * self.dim, latent_dim)
         self.decoder.bneck = nn.Linear(2 * self.dim * self.dim, self.decoder.bneck.out_features)
 
@@ -92,8 +91,6 @@ class QVAE(VAE):
         sigma_real = (indentity.unsqueeze(0).repeat(batch_size, 1, 1) / self.dim).flatten(1)
         sigma_imag = t.zeros_like(sigma_real)
         sigma = t.cat([sigma_real, sigma_imag], dim=1).float()
-
-        #z = self.unquantization_layer(sigma)
 
         if label is None:
             label = t.randint(0, self.num_classes, (batch_size,), device=device)

@@ -153,6 +153,7 @@ class GAN(nn.Module):
 
   @t.no_grad()
   def visualize_sample(self, test_dataloader, label=None, batch_size=4, device=t.device('cpu')):
+    self.eval()
     sample, label = next(iter(DataLoader(test_dataloader, batch_size=batch_size, shuffle=True)))
 
     gen = self.generate_sample(label=label, batch_size=batch_size, device=device).cpu().numpy()
