@@ -2,7 +2,7 @@ import torch.nn as nn
 
 class SelfAttentionLayer(nn.Module):
     def __init__(self, channels, time_dim, embed_dim, num_heads=4):
-        super().__init__()
+        super(SelfAttentionLayer, self).__init__()
         self.num_heads = num_heads
         self.time_proj = nn.Linear(time_dim + embed_dim, channels)
         self.groupnorm = nn.GroupNorm(8, num_channels=channels)

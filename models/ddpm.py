@@ -72,14 +72,10 @@ class InverseDiffusionProcess(nn.Module):
         self.out = nn.Conv2d(16, 1, kernel_size=(3, 4), padding=(1, 1))
 
     def forward(self, x, time, label=None):
-
         x, t_emb, skips = self.encode(x, time, label=label)
-
         x = self.res_block(x, t_emb)     
         x = self.res_attn(x, t_emb)
-
         x = self.decode(x, t_emb, *skips)
-
         return self.out(x)
     
     def encode(self, x, time, label=None):

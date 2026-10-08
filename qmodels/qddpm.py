@@ -77,15 +77,10 @@ class QuantumDiffusionModel(DiffusionModel):
         self.circuits = self.quantum_step_bottleneck.circuits
 
     def forward(self, x, time, label=None):
-
         x, t_emb, skips = self.model.encode(x, time, label=label)
-
         x = self.model.res_block(x, t_emb)
-
         x = self.quantum_step_bottleneck(x.flatten(1), t_emb)
-
         x = self.model.decode(x, t_emb, *skips)
-
         return self.model.out(x)
 
     def visualize_sample(self, test_dataset, batch_size=4, style="mpl", device='cpu', **kwargs):

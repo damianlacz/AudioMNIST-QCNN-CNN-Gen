@@ -3,7 +3,7 @@ import torch.nn as nn
 
 class ConvBlock(nn.Module):
   def __init__(self, in_channels, out_channels, time_dim=64, embed_dim=64):
-    super().__init__()
+    super(ConvBlock, self).__init__()
     self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, padding_mode='reflect')
     self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='reflect')
     self.time_proj = nn.Linear(time_dim + embed_dim, out_channels)
@@ -21,7 +21,7 @@ class ConvBlock(nn.Module):
 
 class TransConvBlock(nn.Module):
   def __init__(self, in_channels, out_channels, time_dim=64, embed_dim=64, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1)):
-    super().__init__()
+    super(TransConvBlock, self).__init__()
     self.trans_conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
     self.time_proj = nn.Linear(time_dim + embed_dim, out_channels)
     self.groupnorm = nn.GroupNorm(8, out_channels)
@@ -36,7 +36,7 @@ class TransConvBlock(nn.Module):
 
 class ResBlock(nn.Module):
   def __init__(self, channels, time_dim=64, embed_dim=64, dense_dim=16):
-    super().__init__()
+    super(ResBlock, self).__init__()
     self.conv1 = nn.Conv2d(channels, channels, kernel_size=(3, 3), padding=(1, 1), padding_mode='reflect')
     self.conv2 = nn.Conv2d(channels, channels, kernel_size=(3, 3), padding=(1, 1), padding_mode='reflect')
     self.time_proj = nn.Linear(time_dim + embed_dim, channels)
